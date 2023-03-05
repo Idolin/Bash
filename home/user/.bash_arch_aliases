@@ -1,0 +1,142 @@
+#!/bin/bash
+DEFAULT_PACKAGE_MANAGER=yay
+if [ -z "$PACKAGE_MANAGER" ]; then
+	for PACKAGE_MANAGER in $DEFAULT_PACKAGE_MANAGER yay yaourt pacman false; do
+		hash $PACKAGE_MANAGER &>/dev/null && break
+	done
+	if [[ "$PACKAGE_MANAGER" == false ]]; then
+		log -e "No package manager found"
+		exit 1
+	fi
+fi
+if [ -z "$SUDO_PACKAGE_MANAGER" ]; then
+	SUDO_PACKAGE_MANAGER="$PACKAGE_MANAGER"
+	if [[ "$PACKAGE_MANAGER" == pacman ]]; then
+		SUDO_PACKAGE_MANAGER="sudo $SUDO_PACKAGE_MANAGER"
+	fi
+fi
+alias sai="$SUDO_PACKAGE_MANAGER -Sy --needed"
+sau()
+{
+	local aur= sopt='-Syu' big_tmp=false remount=false
+	while true; do
+		if [[ "$1" == -- ]]; then
+			shift
+			break;
+		elif [[ "$1" =~ ^(\+h|-h|--help)$ ]]; then
+			echo -e "Script for upgrading packages
+Options:
+\t+y: force update
+\t+Y: don't update
+\t+s: make sure there at least 2GBs in tmp directory
+\t+A: don't update AUR packages
+\t+h|-h|--help: show this help and exit
+\t--: use following arguments as options for package manager"
+			return
+		elif [[ ! "${1:0:1}" == \+ ]]; then
+			break
+		fi
+		for((i=1;i<${#1};i++)); do
+			case "${1:i:1}" in
+				y) sopt='-Syyu';;
+				Y) sopt='-Su';;
+				s) big_tmp=true;;
+				A) aur='--repo';;
+				*) echo "Unknown option:+${1:i:1}">&2; return 1;;
+			esac
+		done
+		shift
+	done
+	if $big_tmp; then
+		tmpsize=`df --output=size -B K /tmp | tail -n1`
+		tmpsize="${tmpsize// }"
+		[ "${tmpsize/K}" -lt 20971520 ] && remount=true && sudo mount -o remount,size=20G,noatime /tmp
+	fi
+	$SUDO_PACKAGE_MANAGER $aur $sopt $@
+	$remount && sudo mount -o remount,size="$tmpsize",noatime /tmp
+}
+sad()
+{
+	if [ ! -x /etc/pacman.d/hooks/mirrorlist_update.sh ]; then
+		echo "No executable mirrorlist update script found" >&2
+		return 1
+	fi
+	if [[ "$1" =~ ^(-f|--force)$ ]]; then
+		sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.pacnew || return 1
+		sudo mv /etc/pacman.d/mirrorlist.old /etc/pacman.d/mirrorlist 2>/dev/null
+	elif [ ! -f /etc/pacman.d/mirrorlist.pacnew ]; then
+		echo "No new mirrorlist" >&2
+		return 2
+	fi
+	sudo /etc/pacman.d/hooks/mirrorlist_update.sh
+}
+alias sar="$SUDO_PACKAGE_MANAGER -Rs $@"
+saa()
+{
+	local st=`df '/' | tail -1 | grep -oE '[[:digit:]]+' | tail -n2 | head -n1` st2 dif msg cache_clear_arg="-Sc"
+	while [ -n "$1" ]; do
+		case "$1" in
+			-f|--full) cache_clear_arg="-Scc";;
+			*) echo "Unknown option: $1" >&1; return 1;;
+		esac
+		shift
+	done
+	package_list="$($PACKAGE_MANAGER -Qtdq)";
+	[ -z "$package_list" ] && echo "No packages to remove" || $SUDO_PACKAGE_MANAGER -Rscn $package_list;
+	unset package_list;
+	echo -e "y\nn" | $SUDO_PACKAGE_MANAGER $cache_clear_arg;
+	sync
+	st2=`df '/' | tail -1 | grep -oE '[[:digit:]]+' | tail -n2 | head -n1`
+	dif=$[st-st2]
+	[ "$dif" -lt 0 ] && msg=${dif:1} || msg=$dif
+	if [ "$msg" -ge 1024 ]; then
+		msg="$[(msg+52)/1024].$[((msg+52)%1024)/102]"
+		[ "${msg/*.}" -eq 0 ] && msg=${msg/.*}
+		msg="$msg Mb"
+	else
+		msg="$msg Kb"
+	fi
+	if [ "$st" -gt "$st2" ]; then
+		echo "Free space decreased on $msg"
+	elif [ "$st" -lt "$st2" ]; then
+		echo "Free space increased on $msg"
+	else
+		echo "No significant free disk space changes"
+	fi
+}
+sak()
+{
+	sudo pacman-key --init
+	sudo pacman-key --populate archlinux
+	sudo pacman-key --refresh-keys
+	sai archlinux-keyring
+	sudo pacman-key --init
+        sudo pacman-key --populate archlinux
+	sudo pacman-key --refresh-keys
+}
+if [[ "$PACKAGE_MANAGER" == pacman ]]; then
+	alias saf="$SUDO_PACKAGE_MANAGER -Sy && $PACKAGE_MANAGER -Ss"
+else
+	alias saf="$SUDO_PACKAGE_MANAGER -Sy && $SUDO_PACKAGE_MANAGER"
+fi
+alias safu="sudo pacman-key --init && sudo pacman-key --populate archlinux && sudo pacman-key --refresh-keys && sau"
+alias sal="$PACKAGE_MANAGER -Q"
+sao()
+{
+	local executable
+	if [ -z "$1" ]; then
+		echo "Argument expected">&2
+		return 1
+	elif [ -e "$1" ]; then
+		$PACKAGE_MANAGER -Qo "$1"
+	elif $PACKAGE_MANAGER -Ql "$1" &>/dev/null; then
+		$PACKAGE_MANAGER -Ql "$1"
+	else
+		executable="$(type -p "$1")"
+		if [ -n "$executable" ] && $PACKAGE_MANAGER -Qo "$executable" &>/dev/null; then
+			$PACKAGE_MANAGER -Qo "$executable"
+		else
+			$PACKAGE_MANAGER -Ql "$1"
+		fi
+	fi
+}
